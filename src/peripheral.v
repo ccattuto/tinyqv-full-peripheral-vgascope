@@ -31,56 +31,126 @@ module tqvp_example (
     output        user_interrupt  // Dedicated interrupt request for this peripheral
 );
 
-    // Implement a 32-bit read/write register at address 0
-    reg [31:0] example_data;
+    localparam SREG_LEN = 64;
+    localparam SREG_NUM = 6;
+    reg [SREG_LEN-1:0] sreg[0:SREG_NUM-1];
+
     always @(posedge clk) begin
         if (!rst_n) begin
-            example_data <= 0;
-        end else begin
-            if (address == 6'h0) begin
-                if (data_write_n != 2'b11)              example_data[7:0]   <= data_in[7:0];
-                if (data_write_n[1] != data_write_n[0]) example_data[15:8]  <= data_in[15:8];
-                if (data_write_n == 2'b10)              example_data[31:16] <= data_in[31:16];
+            integer i;
+            for (i=0; i < SREG_NUM; i=i+1) begin
+                sreg[i] <= {SREG_LEN{1'b0}};
+            end
+        end else if (~pix_x[10] & (&pix_x[3:0])) begin
+            integer i;
+            for (i=0; i < SREG_NUM; i=i+1) begin
+                sreg[i] <= { sreg[i][0], sreg[i][SREG_LEN-1:1]};  // shift right
             end
         end
     end
 
-    // The bottom 8 bits of the stored data are added to ui_in and output to uo_out.
-    assign uo_out = example_data[7:0] + ui_in;
+    reg [SREG_NUM-1:0] scope_value;
+    integer j;
+    always @* begin
+        for (j=0; j < SREG_NUM; j=j+1) begin
+            scope_value[j] = sreg[j][0];
+        end
+    end
 
-    // Address 0 reads the example data register.  
-    // Address 4 reads ui_in
-    // All other addresses read 0.
-    assign data_out = (address == 6'h0) ? example_data :
-                      (address == 6'h4) ? {24'h0, ui_in} :
-                      32'h0;
+    // ----- HOST INTERFACE -----
+
+    localparam REG_PUSHVAL = 6'h00;
+    localparam REG_BG_COLOR = 6'h01;
+    localparam REG_TEXT_COLOR = 6'h02;
+    localparam REG_STATUS = 6'h3F;
+
+    reg [5:0] text_color;  // Text color
+    reg [5:0] bg_color;  // Background color
+    reg [5:0] new_value;  // New value to push into shift register
+    reg valid;
+    
+    // Writes (only write lowest 8 bits)
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            bg_color <= 6'b010000;
+            text_color <= 6'b110011;
+            new_value <= 6'b000000;
+            valid <= 0;
+        end else begin
+            if (~&data_write_n) begin
+                if (address == REG_BG_COLOR) begin
+                    bg_color <= data_in[5:0];
+                end else if (address == REG_TEXT_COLOR) begin
+                    text_color <= data_in[5:0];
+                end else if ((address == REG_PUSHVAL) && !valid) begin
+                    new_value <= data_in[5:0];
+                    valid <= 1;
+                end
+            end else begin
+                valid <= 0;
+            end
+        end
+    end
+
+    // Register reads
+    assign data_out = (&address) ? {29'b0, hsync, vsync, interrupt} : 32'h0;  // REG_STATUS
 
     // All reads complete in 1 clock
     assign data_ready = 1;
     
-    // User interrupt is generated on rising edge of ui_in[6], and cleared by writing a 1 to the low bit of address 8.
-    reg example_interrupt;
-    reg last_ui_in_6;
+    // --- Interrupt handling ---
+    reg interrupt;
+    assign user_interrupt = interrupt;
 
     always @(posedge clk) begin
         if (!rst_n) begin
-            example_interrupt <= 0;
+            interrupt <= 0;
+        end else begin
+            if ((y_hi == 5'd16) && !(|y_lo) && (~|pix_x)) begin
+                interrupt <= 1;
+            end else if ((&address) & (~&data_read_n)) begin  // read REG_VGA
+                interrupt <= 0;
+            end
         end
-
-        if (ui_in[6] && !last_ui_in_6) begin
-            example_interrupt <= 1;
-        end else if (address == 6'h8 && data_write_n != 2'b11 && data_in[0]) begin
-            example_interrupt <= 0;
-        end
-
-        last_ui_in_6 <= ui_in[6];
     end
 
-    assign user_interrupt = example_interrupt;
+    // ----- VGA INTERFACE -----
 
-    // List all unused inputs to prevent warnings
-    // data_read_n is unused as none of our behaviour depends on whether
-    // registers are being read.
-    wire _unused = &{data_read_n, 1'b0};
+    // VGA signals
+    wire hsync, vsync, blank;
+    reg [1:0] R, G, B;
+    wire [10:0] pix_x;
+    wire [10:0] pix_y;
+    wire [5:0] y_lo;
+    wire [4:0] y_hi;
+
+    // TinyVGA PMOD
+    assign uo_out = {hsync, B[0], G[0], R[0], vsync, B[1], G[1], R[1]};
+
+    vga_timing hvsync_gen (
+        .clk(clk),
+        .rst_n(rst_n),
+        .hsync(hsync),
+        .vsync(vsync),
+        .blank(blank),
+        .x_lo(pix_x[4:0]),
+        .x_hi(pix_x[10:5]),
+        .y_lo(y_lo),
+        .y_hi(y_hi)
+    );
+
+    assign pix_y = ({6'b0, y_hi} << 5) + ({6'b0, y_hi} << 4) + {5'b0, y_lo};  // pix_y = y_hi * 48 + y_lo
+    wire [3:0] y_blk = pix_y[10:7];  // 128-pixel high blocks
+    wire frame_active = (~pix_x[10]) && (y_blk < 4'h6);  // active area is 1024x768
+    
+    wire pixel_on = frame_active && (pix_y[9:4] == scope_value);
+
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            {B, G, R} <= 6'b000000;
+        end else begin
+            {B, G, R} <= blank ? 6'b000000 : (pixel_on ? text_color : bg_color);
+        end
+    end
 
 endmodule

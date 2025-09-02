@@ -2,8 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import cocotb
-from cocotb.clock import Clock
-from cocotb.triggers import ClockCycles
+from cocotb.clock import Clock, Timer
+from cocotb.triggers import Edge, ClockCycles, RisingEdge, FallingEdge, ReadOnly
+import numpy as np
+import imageio.v2 as imageio
+from cocotb.utils import get_sim_time
+import random
 
 from tqv import TinyQV
 
@@ -16,8 +20,18 @@ PERIPHERAL_NUM = 0
 async def test_project(dut):
     dut._log.info("Start")
 
-    # Set the clock period to 100 ns (10 MHz)
-    clock = Clock(dut.clk, 100, units="ns")
+    # VGA signals
+    hsync = dut.uo_out[7]
+    vsync = dut.uo_out[3]
+    R0 = dut.uo_out[4]
+    G0 = dut.uo_out[5]
+    B0 = dut.uo_out[6]
+    R1 = dut.uo_out[0]
+    G1 = dut.uo_out[1]
+    B1 = dut.uo_out[2]
+
+    # 64 MHz
+    clock = Clock(dut.clk, 15626, units="ps")
     cocotb.start_soon(clock.start())
 
     # Interact with your design's registers through this TinyQV class.
@@ -32,46 +46,81 @@ async def test_project(dut):
 
     dut._log.info("Test project behavior")
 
-    # Test register write and read back
-    await tqv.write_word_reg(0, 0x82345678)
-    assert await tqv.read_byte_reg(0) == 0x78
-    assert await tqv.read_hword_reg(0) == 0x5678
-    assert await tqv.read_word_reg(0) == 0x82345678
+    await tqv.write_byte_reg(0x01, 0b010000)
+    await tqv.write_byte_reg(0x02, 0b001100)
 
-    # Set an input value, in the example this will be added to the register value
-    dut.ui_in.value = 30
+    while await tqv.read_byte_reg(0x3F) & 0x01 == 0:
+        await ClockCycles(dut.clk, 1)
+    await tqv.write_byte_reg(0x00, 0b001111)
 
-    # Wait for two clock cycles to see the output values, because ui_in is synchronized over two clocks,
-    # and a further clock is required for the output to propagate.
-    await ClockCycles(dut.clk, 3)
+    while await tqv.read_byte_reg(0x3F) & 0x01 == 0:
+        await ClockCycles(dut.clk, 1)  
+    await tqv.write_byte_reg(0x00, 0b001110)
 
-    # The following assersion is just an example of how to check the output values.
-    # Change it to match the actual expected output of your module:
-    assert dut.uo_out.value == 0x96
+    # while await tqv.read_byte_reg(0x3F) & 0x01 == 0:
+    #     await ClockCycles(dut.clk, 1)
+    # await tqv.write_byte_reg(0x00, 0b1011101)
 
-    # Input value should be read back from register 1
-    assert await tqv.read_byte_reg(4) == 30
+    # grab next VGA frame and compare with reference image
+    vgaframe = await grab_vga(dut, hsync, vsync, R1, R0, B1, B0, G1, G0)
+    imageio.imwrite("vga_grab1.png", vgaframe * 64)
+    #vgaframe_ref = imageio.imread("vga_ref1.png") / 64
+    #assert np.all(vgaframe == vgaframe_ref)
 
-    # Zero should be read back from register 2
-    assert await tqv.read_word_reg(8) == 0
 
-    # A second write should work
-    await tqv.write_word_reg(0, 40)
-    assert dut.uo_out.value == 70
+# Grab one VGA frame from the DUT.
+# Returns a (height, width, 3) numpy array with 2-bit RGB values.
+# Default: 1024x768 @ 60Hz timing with 22 line vertical back porch
+# and 152 pixel horizontal back porch.
+# NOTICE: it assumes that the pixel clock is the same as the system clock.
+async def grab_vga(dut, hsync, vsync, R1, R0, B1, B0, G1, G0,
+                   width=1024, height=768, v_back_porch_lines=28, h_back_porch_pixels=152):
+    vga_frame = np.zeros((height, width, 3), dtype=np.uint8)
 
-    # Test the interrupt, generated when ui_in[6] goes high
-    dut.ui_in[6].value = 1
-    await ClockCycles(dut.clk, 1)
-    dut.ui_in[6].value = 0
+    # sync to the end of the vsync pulse
+    dut._log.info("grab VGA frame: wait for vsync")
+    while vsync.value.integer == 0:
+        await Edge(dut.uo_out)
+    while vsync.value.integer == 1:  # wait for vsync pulse to finish
+        await Edge(dut.uo_out)
+    dut._log.info("grab VGA frame: start")
 
-    # Interrupt asserted
-    await ClockCycles(dut.clk, 3)
-    assert await tqv.is_interrupt_asserted()
+    # if hsync is low, clear this pulse
+    if hsync.value.integer == 0:
+        while hsync.value.integer == 0:
+            await Edge(dut.uo_out)
 
-    # Interrupt doesn't clear
-    await ClockCycles(dut.clk, 10)
-    assert await tqv.is_interrupt_asserted()
-    
-    # Write bottom bit of address 8 high to clear
-    await tqv.write_byte_reg(8, 1)
-    assert not await tqv.is_interrupt_asserted()
+    # skip v_back_porch_lines
+    for _ in range(v_back_porch_lines):
+        while hsync.value.integer == 1:
+            await Edge(dut.uo_out)
+        while hsync.value.integer == 0:
+            await Edge(dut.uo_out)
+
+    # grab lines
+    for ypos in range(height):
+        # sync to end of hsync pulse
+        while hsync.value.integer == 1:
+            await Edge(dut.uo_out)
+        while hsync.value.integer == 0:
+            await Edge(dut.uo_out)
+
+        # skip h_back_porch_pixels
+        await ClockCycles(dut.clk, h_back_porch_pixels)
+
+        # sync to falling edge of clk to sample mid-pixel
+        await FallingEdge(dut.clk)
+
+        # grab pixels
+        for xpos in range(width):
+            vga_frame[ypos][xpos][0] = (R1.value.integer << 1) | R0.value.integer
+            vga_frame[ypos][xpos][1] = (G1.value.integer << 1) | G0.value.integer
+            vga_frame[ypos][xpos][2] = (B1.value.integer << 1) | B0.value.integer
+
+            # wait 1 clock cycle for next pixel
+            await RisingEdge(dut.clk)
+            await FallingEdge(dut.clk)
+
+    dut._log.info("grab VGA frame: done")
+
+    return vga_frame
