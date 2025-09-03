@@ -6,8 +6,7 @@ from cocotb.clock import Clock, Timer
 from cocotb.triggers import Edge, ClockCycles, RisingEdge, FallingEdge, ReadOnly
 import numpy as np
 import imageio.v2 as imageio
-from cocotb.utils import get_sim_time
-import random
+import math
 
 from tqv import TinyQV
 
@@ -46,26 +45,30 @@ async def test_project(dut):
 
     dut._log.info("Test project behavior")
 
-    await tqv.write_byte_reg(0x01, 0b010000)
-    await tqv.write_byte_reg(0x02, 0b001100)
+    await tqv.write_byte_reg(0x01, 0b010000)  # background color: dark blue
+    await tqv.write_byte_reg(0x02, 0b001100)  # text color: green
 
-    while await tqv.read_byte_reg(0x3F) & 0x01 == 0:
-        await ClockCycles(dut.clk, 1)
-    await tqv.write_byte_reg(0x00, 0b001111)
+    for i in range(16):
+        while await tqv.read_byte_reg(0x3F) & 0x01 == 0:
+            await ClockCycles(dut.clk, 1)
+        await tqv.write_byte_reg(0x00, 24)
 
-    while await tqv.read_byte_reg(0x3F) & 0x01 == 0:
-        await ClockCycles(dut.clk, 1)  
-    await tqv.write_byte_reg(0x00, 0b001110)
+    for i in range(32):
+        val = int( 24 + 20 * math.sin(i * 2 * math.pi / 32) )
+        while await tqv.read_byte_reg(0x3F) & 0x01 == 0:
+            await ClockCycles(dut.clk, 1)
+        await tqv.write_byte_reg(0x00, val)
 
-    # while await tqv.read_byte_reg(0x3F) & 0x01 == 0:
-    #     await ClockCycles(dut.clk, 1)
-    # await tqv.write_byte_reg(0x00, 0b1011101)
+    for i in range(16):
+        while await tqv.read_byte_reg(0x3F) & 0x01 == 0:
+            await ClockCycles(dut.clk, 1)
+        await tqv.write_byte_reg(0x00, 24 + (i & 1))
 
     # grab next VGA frame and compare with reference image
     vgaframe = await grab_vga(dut, hsync, vsync, R1, R0, B1, B0, G1, G0)
     imageio.imwrite("vga_grab1.png", vgaframe * 64)
-    #vgaframe_ref = imageio.imread("vga_ref1.png") / 64
-    #assert np.all(vgaframe == vgaframe_ref)
+    vgaframe_ref = imageio.imread("vga_ref1.png") / 64
+    assert np.all(vgaframe == vgaframe_ref)
 
 
 # Grab one VGA frame from the DUT.
