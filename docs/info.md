@@ -24,7 +24,7 @@ The peripheral provides a 64x48 VGA scope to visualize time series of data. It g
 ## Register map
 
 - Writing to `PUSHVAL` pushes a new value (6 bits, 0 to 47) to the VGA scope. The new value is shown on the rightmost column of the display, existing data scrolls left by one place, the leftmost sample drops off.
-- Writing to `BGCOL` sets the background color (low 6 bits, 2 bits per color channel, BBGGRR order). The default color is dark blue (010000). Bit 7 controls whether samples are plotted as dots (default, bit 7 = 0) or spark lines (bit 7 = 1).
+- Writing to `BGCOL` sets the background color (low 6 bits, 2 bits per color channel, BBGGRR order). The default color is dark blue (010000).
 - Writing to `TXTCOL` sets the text color (low 6 bits, 2 bits per color channel, BBGGRR order). The default color is magenta 110011.
 - `STATUS`: bit 0 signals that the peripheral is ready to process a new sample (this occurs during the vertical blank period of the VGA display). Bit 1 is the interrupt signal, bit 2 is vsync, bit 3 is hsync. Reading `VGA` clears the peripheral's interrupt signal.
 

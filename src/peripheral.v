@@ -72,7 +72,6 @@ module tqvp_example (
 
     reg [5:0] text_color;   // Text color
     reg [5:0] bg_color;     // Background color
-    reg spark;
     reg [5:0] push_val;     // New value to push into shift register
     reg valid;
     
@@ -81,14 +80,12 @@ module tqvp_example (
         if (!rst_n) begin
             bg_color <= 6'b010000;
             text_color <= 6'b110011;
-            spark <= 0;
             push_val <= 6'b000000;
             valid <= 0;
         end else begin
             if (~&data_write_n) begin
                 if (address == REG_BG_COLOR) begin
                     bg_color <= data_in[5:0];
-                    spark <= data_in[7];
                 end else if (address == REG_TEXT_COLOR) begin
                     text_color <= data_in[5:0];
                 end else if ((address == REG_PUSHVAL) && !valid) begin
@@ -157,8 +154,7 @@ module tqvp_example (
     wire frame_active = active_x & active_y;  // active area is 1024x768
 
     // y = scope value
-    // Draw "dot" or "spark line"
-    wire pixel_on = frame_active && (spark ? (pix_y[9:4] >= scope_value) : (pix_y[9:4] == scope_value));
+    wire pixel_on = frame_active && (pix_y[9:4] == scope_value);
 
     always @(posedge clk) begin
         if (!rst_n) begin
